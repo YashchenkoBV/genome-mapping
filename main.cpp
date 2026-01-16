@@ -22,7 +22,6 @@ static const int MAX_PER_SEED = 80;
 static const int MAX_CANDIDATES = 200;     
 static const int MARGIN = 60;             
 
-static const double VERIFY_ID_THRESH = 0.90; 
 static const double SW_ID_THRESH = 0.90;    
 static const double SW_LEN_THRESH = 0.70;  
 
@@ -299,16 +298,9 @@ bool map_read(
     bool& multi_hit,
     int& sw_calls,
     bool& sw_accepted,
-    bool& verify_accepted,
-    bool& had_seed_hits,
-    bool& filtered_low_complexity
+    bool& verify_accepted
 ) {
-    filtered_low_complexity = false;
-
-    if (is_low_complexity(read)) {
-        filtered_low_complexity = true;
-        return false;
-    }
+    if (is_low_complexity(read)) return false;
 
     int ref_len = (int)ref.size();
     vector<Alignment> accepted;
@@ -316,7 +308,6 @@ bool map_read(
     sw_calls = 0;
     sw_accepted = false;
     verify_accepted = false;
-    had_seed_hits = false;
 
     auto try_orientation = [&](const string& oriented) {
         if (oriented.empty()) return;
@@ -331,8 +322,6 @@ bool map_read(
             auto iv = fm.search(seed.second);
             int hits = iv.second - iv.first;
             if (hits <= 0) continue;
-
-            had_seed_hits = true;
 
             if (hits <= MAX_PER_SEED) {
                 for (int i = iv.first; i < iv.second; ++i) {
@@ -444,7 +433,7 @@ bool map_read(
     }
     accepted.swap(dedup);
 
-    // Choose best by score
+
     sort(accepted.begin(), accepted.end(), [](const Alignment& a, const Alignment& b) {
         return a.score > b.score;
     });
@@ -463,14 +452,14 @@ bool map_read(
 int main() {
     const int BATCH = 200000;
 
-    cout << "[INFO] Reading reference\n" << flush;
+    cout << "Reading reference\n" << flush;
     string ref = read_fasta("GCF_000005845.2_ASM584v2_genomic.fna");
     int ref_len = (int)ref.size();
 
-    cout << "[INFO] Building FM-index\n" << flush;
+    cout << "Building FM-index\n" << flush;
     FMIndex fm;
     fm.build(ref);
-    cout << "[INFO] FM-index built\n" << flush;
+    cout << "FM-index built\n" << flush;
 
     ifstream fq("ERR022075_1.fastq");
     if (!fq) {
@@ -481,9 +470,9 @@ int main() {
     int num_threads = 1;
 #ifdef _OPENMP
     num_threads = omp_get_max_threads();
-    cout << "[INFO] OpenMP threads: " << num_threads << "\n" << flush;
+    cout << "OpenMP threads: " << num_threads << "\n" << flush;
 #else
-    cout << "[INFO] OpenMP not enabled\n" << flush;
+    cout << "OpenMP not enabled\n" << flush;
 #endif
 
     vector<vector<int>> thread_cov(num_threads, vector<int>(ref_len, 0));
@@ -494,24 +483,16 @@ int main() {
     long long total_bases = 0;  
     double sum_read_mean_q = 0; 
 
-    long long reads_with_seed_hits = 0;
-    long long reads_that_ran_sw = 0;
     long long total_sw_calls = 0;
     long long reads_verify_accepted = 0;
     long long reads_sw_accepted = 0;
-    long long reads_filtered_low_complexity = 0;
 
     string id, seq, plus, qual;
     vector<string> batch;
     batch.reserve(BATCH);
 
-    cout << "[INFO] FASTQ streaming started\n" << flush;
-    cout << "[INFO] Seeding: k=" << KMER << ", step=" << STEP << "\n";
-    cout << "[INFO] Verify ID thresh: " << VERIFY_ID_THRESH << "\n";
-    cout << "[INFO] SW thresholds: min_identity=" << SW_ID_THRESH
-         << ", min_len_frac=" << SW_LEN_THRESH << "\n";
-    cout << "[INFO] Low complexity: max_base_frac>" << MAX_BASE_FRAC
-         << " OR entropy<" << ENTROPY_THRESH << " bits\n";
+    cout << "FASTQ streaming started\n" << flush;
+    cout << "Seeding: k=" << KMER << ", step=" << STEP << "\n";
 
     while (true) {
         batch.clear();
@@ -536,9 +517,8 @@ int main() {
         total += batch_n;
 
         vector<long long> t_mapped(num_threads, 0), t_unique(num_threads, 0), t_multi(num_threads, 0);
-        vector<long long> t_seed_hits(num_threads, 0), t_sw_reads(num_threads, 0), t_sw_calls(num_threads, 0);
+        vector<long long> t_sw_calls(num_threads, 0);
         vector<long long> t_verify_acc(num_threads, 0), t_sw_acc(num_threads, 0);
-        vector<long long> t_lowcomp(num_threads, 0);
 
 #ifdef _OPENMP
         #pragma omp parallel for schedule(dynamic, 256)
@@ -554,24 +534,18 @@ int main() {
             int best_start = 0, best_end = 0;
             bool uniq = false, multi_flag = false;
             int sw_calls = 0;
-            bool sw_acc = false, ver_acc = false, seed_hits = false, lowcomp = false;
+            bool sw_acc = false, ver_acc = false;
 
             bool mapped_flag = map_read(
                 fm, ref, batch[i],
                 best_start, best_end,
                 uniq, multi_flag,
-                sw_calls, sw_acc, ver_acc, seed_hits, lowcomp
+                sw_calls, sw_acc, ver_acc
             );
 
-            if (lowcomp) {
-                t_lowcomp[tid]++;
-            } else {
-                if (seed_hits) t_seed_hits[tid]++;
-                if (sw_calls > 0) t_sw_reads[tid]++;
-                t_sw_calls[tid] += sw_calls;
-                if (ver_acc) t_verify_acc[tid]++;
-                if (sw_acc) t_sw_acc[tid]++;
-            }
+            t_sw_calls[tid] += sw_calls;
+            if (ver_acc) t_verify_acc[tid]++;
+            if (sw_acc) t_sw_acc[tid]++;
 
             if (mapped_flag) {
                 t_mapped[tid]++;
@@ -594,12 +568,9 @@ int main() {
             unique += t_unique[t];
             multi += t_multi[t];
 
-            reads_with_seed_hits += t_seed_hits[t];
-            reads_that_ran_sw += t_sw_reads[t];
             total_sw_calls += t_sw_calls[t];
             reads_verify_accepted += t_verify_acc[t];
             reads_sw_accepted += t_sw_acc[t];
-            reads_filtered_low_complexity += t_lowcomp[t];
         }
     }
 
@@ -614,16 +585,11 @@ int main() {
     }
 
     long long cov_sum = 0;
-    int cov_ge1 = 0, cov_ge10 = 0;
     for (int v : coverage) {
         cov_sum += v;
-        if (v >= 1) cov_ge1++;
-        if (v >= 10) cov_ge10++;
     }
 
     double mean_cov = ref_len ? (double)cov_sum / (double)ref_len : 0.0;
-    double cov1_pct = ref_len ? 100.0 * (double)cov_ge1 / (double)ref_len : 0.0;
-    double cov10_pct = ref_len ? 100.0 * (double)cov_ge10 / (double)ref_len : 0.0;
 
     long long unmapped = total - mapped;
     double mapping_rate = total ? 100.0 * (double)mapped / (double)total : 0.0;
@@ -634,8 +600,6 @@ int main() {
     double unique_pct_mapped = mapped ? 100.0 * (double)unique / (double)mapped : 0.0;
     double multi_pct_mapped = mapped ? 100.0 * (double)multi / (double)mapped : 0.0;
 
-    double seed_hit_pct = total ? 100.0 * (double)reads_with_seed_hits / (double)total : 0.0;
-    double sw_read_pct = total ? 100.0 * (double)reads_that_ran_sw / (double)total : 0.0;
     double mean_q_per_base = total_bases ? (double)total_qual / (double)total_bases : 0.0;
     double mean_q_per_read = total ? sum_read_mean_q / (double)total : 0.0;
 
@@ -647,19 +611,12 @@ int main() {
     cout << "Multi-mapped reads: " << multi
          << " (" << multi_pct_total << "% of total, " << multi_pct_mapped << "% of mapped)\n";
     cout << "Unmapped reads: " << unmapped << "\n";
-
-    cout << "Low-complexity filtered reads: " << reads_filtered_low_complexity << "\n";
-    cout << "Reads with seed hits (not low-comp): " << reads_with_seed_hits << " (" << seed_hit_pct << "%)\n";
-    cout << "Reads that ran SW (not low-comp): " << reads_that_ran_sw << " (" << sw_read_pct << "%)\n";
     cout << "Total SW calls: " << total_sw_calls << "\n";
     cout << "Reads with at least one verify-accepted alignment: " << reads_verify_accepted << "\n";
     cout << "Reads with at least one SW-accepted alignment: " << reads_sw_accepted << "\n";
     cout << "Mean Q (per base): " << mean_q_per_base << "\n";
     cout << "Mean Q (per read average): " << mean_q_per_read << "\n";
-
     cout << "Mean coverage: " << mean_cov << "\n";
-    cout << "Genome covered >=1x: " << cov1_pct << "%\n";
-    cout << "Genome covered >=10x: " << cov10_pct << "%\n";
 
     return 0;
 }
