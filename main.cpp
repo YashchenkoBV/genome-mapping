@@ -14,27 +14,26 @@
 
 using namespace std;
 
-// --- Mapping parameters (simple, student-level constants) ---
+
 static const int KMER = 20;
 static const int STEP = 10;
 
-static const int MAX_PER_SEED = 80;       // sample this many SA hits per seed when repetitive
-static const int MAX_CANDIDATES = 200;    // max candidate starts tested per orientation
-static const int MARGIN = 60;             // SW window padding around candidate
+static const int MAX_PER_SEED = 80;        
+static const int MAX_CANDIDATES = 200;     
+static const int MARGIN = 60;             
 
-static const double VERIFY_ID_THRESH = 0.90; // fast verify mismatch allowance (Hamming)
-static const double SW_ID_THRESH = 0.90;     // stricter SW identity threshold
-static const double SW_LEN_THRESH = 0.70;    // stricter SW min aligned length fraction
+static const double VERIFY_ID_THRESH = 0.90; 
+static const double SW_ID_THRESH = 0.90;    
+static const double SW_LEN_THRESH = 0.70;  
 
-// Low-complexity filters
-static const double MAX_BASE_FRAC = 0.80;    // reject if any base >80% of non-N
-static const double ENTROPY_THRESH = 0.80;   // reject if Shannon entropy < 0.80 bits
+static const double MAX_BASE_FRAC = 0.80; 
+static const double ENTROPY_THRESH = 0.80; 
 
 struct FMIndex {
     string text, bwt;
     vector<int> sa;
-    vector<int> C;                  // prefix counts, size 256
-    vector<vector<int>> occ;        // occ[i][c] counts c in bwt[0..i-1]
+    vector<int> C;                  
+    vector<vector<int>> occ;        
 
     static void counting_sort(vector<int>& sa, const vector<int>& r, int k, int maxv) {
         int n = (int)sa.size();
@@ -101,7 +100,6 @@ struct FMIndex {
             running += freq[i];
         }
 
-        // NOTE: This occ layout is memory-heavy. Works for this assignment but not production-grade.
         occ.assign(n + 1, vector<int>(256, 0));
         for (int i = 0; i < n; ++i) {
             occ[i + 1] = occ[i];
@@ -156,7 +154,6 @@ struct Alignment {
     int aligned_len = 0;
 };
 
-// Reject very low-complexity reads to prevent spurious local alignments inflating mapping rate.
 bool is_low_complexity(const string& s) {
     long long cntA = 0, cntC = 0, cntG = 0, cntT = 0, cntN = 0;
     for (char c : s) {
@@ -175,7 +172,6 @@ bool is_low_complexity(const string& s) {
     double max_frac = (double)mx / (double)nonN;
     if (max_frac > MAX_BASE_FRAC) return true;
 
-    // Shannon entropy in bits over A/C/G/T only (ignore N)
     auto Hterm = [&](long long c) -> double {
         if (c <= 0) return 0.0;
         double p = (double)c / (double)nonN;
@@ -187,8 +183,6 @@ bool is_low_complexity(const string& s) {
     return false;
 }
 
-// k-mer seeding (k=20, step=10). Skip any seed containing 'N'.
-// If read shorter than k, fallback to the longest non-N segment.
 vector<pair<int,string>> collect_kmer_seeds(const string& s, int k, int step) {
     vector<pair<int,string>> seeds;
     int n = (int)s.size();
@@ -218,7 +212,6 @@ vector<pair<int,string>> collect_kmer_seeds(const string& s, int k, int step) {
 
     for (int i = 0; i + k <= n; i += step) add_seed(i);
 
-    // ensure last k-mer is included
     int last = n - k;
     if (last >= 0 && (seeds.empty() || seeds.back().first != last)) add_seed(last);
 
@@ -296,10 +289,6 @@ Alignment smith_waterman(const string& read, const string& ref, int ws, int we) 
     return res;
 }
 
-// Map a single read:
-// - low-complexity filter first
-// - k-mer seeds -> candidates via vote
-// - verify first, then SW if verify fails
 bool map_read(
     const FMIndex& fm,
     const string& ref,
@@ -352,7 +341,7 @@ bool map_read(
                     raw.push_back(pos);
                 }
             } else {
-                // sample uniformly across the interval
+         
                 for (int k = 0; k < MAX_PER_SEED; ++k) {
                     double frac = (MAX_PER_SEED == 1) ? 0.0 : (double)k / (double)(MAX_PER_SEED - 1);
                     int idx = iv.first + (int)(frac * (hits - 1) + 0.5);
@@ -366,9 +355,8 @@ bool map_read(
 
         if (raw.empty()) return;
 
-        // vote: same start position seen multiple times gets higher priority
         sort(raw.begin(), raw.end());
-        vector<pair<int,int>> voted; // {pos, votes}
+        vector<pair<int,int>> voted; 
         voted.reserve(raw.size());
         for (int i = 0; i < (int)raw.size();) {
             int j = i + 1;
@@ -388,7 +376,6 @@ bool map_read(
             candidates.push_back(voted[i].first);
         }
 
-        // requested: cheap dedup step
         sort(candidates.begin(), candidates.end());
         candidates.erase(unique(candidates.begin(), candidates.end()), candidates.end());
 
@@ -415,7 +402,6 @@ bool map_read(
                 continue;
             }
 
-            // If verify fails, try SW with stricter thresholds (more credible mapping)
             sw_calls++;
             int ws = max(0, pos - MARGIN);
             int we = min(ref_len, pos + (int)oriented.size() + MARGIN);
@@ -437,7 +423,6 @@ bool map_read(
 
     if (accepted.empty()) return false;
 
-    // Dedup accepted alignments by (ref_start, ref_end): keep best score for same interval.
     sort(accepted.begin(), accepted.end(), [](const Alignment& a, const Alignment& b) {
         if (a.ref_start != b.ref_start) return a.ref_start < b.ref_start;
         if (a.ref_end != b.ref_end) return a.ref_end < b.ref_end;
@@ -505,8 +490,10 @@ int main() {
 
     long long total = 0;
     long long mapped = 0, unique = 0, multi = 0;
+    long long total_qual = 0; 
+    long long total_bases = 0;  
+    double sum_read_mean_q = 0; 
 
-    // Stats/counters
     long long reads_with_seed_hits = 0;
     long long reads_that_ran_sw = 0;
     long long total_sw_calls = 0;
@@ -534,6 +521,14 @@ int main() {
             if (!getline(fq, plus)) break;
             if (!getline(fq, qual)) break;
             batch.push_back(seq);
+
+            long long qsum = 0;
+            for (char c : qual) qsum += (int)c - 33;
+            int qlen = (int)qual.size();
+            total_qual += qsum;
+            total_bases += qlen;
+            double mean_q = (qlen > 0) ? (double)qsum / (double)qlen : 0.0;
+            sum_read_mean_q += mean_q;
         }
         if (batch.empty()) break;
 
@@ -608,7 +603,6 @@ int main() {
         }
     }
 
-    // Reduce coverage arrays
     vector<int> coverage(ref_len, 0);
 #ifdef _OPENMP
     #pragma omp parallel for schedule(static)
@@ -634,16 +628,16 @@ int main() {
     long long unmapped = total - mapped;
     double mapping_rate = total ? 100.0 * (double)mapped / (double)total : 0.0;
 
-    // Percent of total (as before)
     double unique_pct_total = total ? 100.0 * (double)unique / (double)total : 0.0;
     double multi_pct_total = total ? 100.0 * (double)multi / (double)total : 0.0;
 
-    // Percent of mapped (more standard)
     double unique_pct_mapped = mapped ? 100.0 * (double)unique / (double)mapped : 0.0;
     double multi_pct_mapped = mapped ? 100.0 * (double)multi / (double)mapped : 0.0;
 
     double seed_hit_pct = total ? 100.0 * (double)reads_with_seed_hits / (double)total : 0.0;
     double sw_read_pct = total ? 100.0 * (double)reads_that_ran_sw / (double)total : 0.0;
+    double mean_q_per_base = total_bases ? (double)total_qual / (double)total_bases : 0.0;
+    double mean_q_per_read = total ? sum_read_mean_q / (double)total : 0.0;
 
     cout << "[INFO] Mapping finished\n" << flush;
     cout << "Total reads: " << total << "\n";
@@ -660,6 +654,8 @@ int main() {
     cout << "Total SW calls: " << total_sw_calls << "\n";
     cout << "Reads with at least one verify-accepted alignment: " << reads_verify_accepted << "\n";
     cout << "Reads with at least one SW-accepted alignment: " << reads_sw_accepted << "\n";
+    cout << "Mean Q (per base): " << mean_q_per_base << "\n";
+    cout << "Mean Q (per read average): " << mean_q_per_read << "\n";
 
     cout << "Mean coverage: " << mean_cov << "\n";
     cout << "Genome covered >=1x: " << cov1_pct << "%\n";
